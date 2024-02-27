@@ -1,113 +1,91 @@
+require('dotenv').config();
+const { Client, IntentsBitField, ButtonBuilder, ButtonStyle, ActionRowBuilder, ComponentType } = require('discord.js');
+const { MongoClient } = require('mongodb');
 
-// const { clientId, guildId, token, publicKey } = require('./config.json');
-require('dotenv').config()
-const APPLICATION_ID = process.env.APPLICATION_ID 
-const TOKEN = process.env.TOKEN 
-const PUBLIC_KEY = process.env.PUBLIC_KEY || 'not set'
-const GUILD_ID = process.env.GUILD_ID 
-
-
-const axios = require('axios')
-const express = require('express');
-const { InteractionType, InteractionResponseType, verifyKeyMiddleware } = require('discord-interactions');
-
-
-const app = express();
-// app.use(bodyParser.json());
-
-const discord_api = axios.create({
-  baseURL: 'https://discord.com/api/',
-  timeout: 3000,
-  headers: {
-	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
-	"Access-Control-Allow-Headers": "Authorization",
-	"Authorization": `Bot ${TOKEN}`
-  }
+const client = new Client({
+    intents: [
+        IntentsBitField.Flags.Guilds,
+        IntentsBitField.Flags.GuildMembers,
+        IntentsBitField.Flags.GuildMessages,
+        IntentsBitField.Flags.MessageContent,
+    ],
 });
 
+// Підключення до бази даних MongoDB
+const uri = process.env.MONGODB_URI;
+const dbName = process.env.DB_NAME;
+const collectionName = process.env.COLLECTION_NAME;
 
+const clientMongo = new MongoClient(uri);
 
+client.on('ready', async () => {
+    console.log('Connected to Discord!');
 
-app.post('/interactions', verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
-  const interaction = req.body;
+    try {
+        await clientMongo.connect();
+        console.log('Connected to MongoDB!');
 
-  if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-    console.log(interaction.data.name)
-    if(interaction.data.name == 'yo'){
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: `Yo ${interaction.member.user.username}!`,
-        },
-      });
+        const database = clientMongo.db(dbName);
+        client.db = database;
+        console.log(`Using database: ${dbName}`);
+
+        client.codesCollection = database.collection(collectionName);
+        console.log(`Using collection: ${collectionName}`);
+    } catch (error) {
+        console.error(error);
     }
+});
 
-    if(interaction.data.name == 'dm'){
-      // https://discord.com/developers/docs/resources/user#create-dm
-      let c = (await discord_api.post(`/users/@me/channels`,{
-        recipient_id: interaction.member.user.id
-      })).data
-      try{
-        // https://discord.com/developers/docs/resources/channel#create-message
-        let res = await discord_api.post(`/channels/${c.id}/messages`,{
-          content:'Yo! I got your slash command. I am not able to respond to DMs just slash commands.',
-        })
-        console.log(res.data)
-      }catch(e){
-        console.log(e)
-      }
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    if (message.content !== 'ping') return;
 
-      return res.send({
-        // https://discord.com/developers/docs/interactions/receiving-and-responding#responding-to-an-interaction
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data:{
-          content:'👍'
+    const getCodeButton = new ButtonBuilder()
+        .setLabel('Get Code')
+        .setStyle('Danger') // Змінив ButtonStyle.PRIMARY на 'PRIMARY'
+        .setCustomId('get-code-button');
+
+    const buttonRow = new ActionRowBuilder().addComponents(getCodeButton);
+
+    const filter = () => true;
+
+    const reply = await message.reply({ content: 'Click the button to get a code...', components: [buttonRow] });
+
+    const collector = reply.createMessageComponentCollector({
+        componentType: ComponentType.BUTTON,
+        filter,
+    });
+
+    collector.on('collect', async (interaction) => {
+        if (interaction.customId === 'get-code-button') {
+            const code = generateCode();
+            try {
+                await interaction.reply({ content: `Your code is: ${code}`, ephemeral: true });
+                await client.codesCollection.insertOne({ username: interaction.user.username, code: code });
+                console.log('Code saved to the database.');
+                setTimeout(async () => {
+                    try {
+                        await client.codesCollection.deleteOne({ code: code });
+                        console.log('Code expired and removed from the database.');
+                    } catch (error) {
+                        console.error('Error removing expired code from the database:', error);
+                    }
+                }, 5 * 60 * 1000); // 5 хвилин у мілісекундах
+            } catch (error) {
+                console.error('Error sending code or saving to the database:', error);
+            }
         }
-      });
-    }
-  }
-
+    });
 });
 
-
-
-app.get('/register_commands', async (req,res) =>{
-  let slash_commands = [
-    {
-      "name": "yo",
-      "description": "replies with Yo!",
-      "options": []
-    },
-    {
-      "name": "dm",
-      "description": "sends user a DM",
-      "options": []
+// Function to generate a random code
+function generateCode() {
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += characters.charAt(Math.floor(Math.random() * characters.length));
     }
-  ]
-  try
-  {
-    // api docs - https://discord.com/developers/docs/interactions/application-commands#create-global-application-command
-    let discord_response = await discord_api.put(
-      `/applications/${APPLICATION_ID}/guilds/${GUILD_ID}/commands`,
-      slash_commands
-    )
-    console.log(discord_response.data)
-    return res.send('commands have been registered')
-  }catch(e){
-    console.error(e.code)
-    console.error(e.response?.data)
-    return res.send(`${e.code} error from discord`)
-  }
-})
+    return code;
+}
 
-
-app.get('/', async (req,res) =>{
-  return res.send('Follow documentation ')
-})
-
-
-app.listen(8999, () => {
-
-})
-
+client.login(process.env.TOKEN);
